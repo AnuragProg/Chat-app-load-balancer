@@ -8,113 +8,27 @@ import(
 	"container/heap"
 )
 
-type ServerStatus struct{
-	Traffic uint64
-	Proxy *httputil.ReverseProxy
-	Index int
-	Mutex sync.Mutex
-	Host string
+// For creating locks for the heap
+var serverMutex = sync.RWMutex{}
+
+type Server struct{
+	Servers *ServerStatuses
 }
 
-type Servers []*ServerStatus
-
-var serverMutex sync.Mutex = sync.Mutex{}
-
-func (servers Servers) Len() int {
-	return len(servers)
-}
-
-// Return true if element i should have a higher priority than element j.
-func (servers Servers) Less(i int, j int) bool {
-	return servers[i].Traffic < servers[j].Traffic
-}
-
-func (servers Servers) Swap(i int, j int) {
-	servers[i].Mutex.Lock()
-	servers[j].Mutex.Lock()
-	defer func(){
-		servers[i].Mutex.Unlock()
-		servers[j].Mutex.Unlock()
-	}()
-
-	servers[i], servers[j] = servers[j], servers[i]
-	servers[i].Index = i
-	servers[j].Index = j
-
-}
-
-/**
-The Push method adds an element to the heap by appending it to the end of the slice
-and then calling the up function to fix the heap invariant.
-*/
-func (servers *Servers) Push(x any) {
-	n := len(*servers)
-	item := x.(*ServerStatus)
-	item.Index = n
-	*servers = append(*servers, item)
-}
-
-/**
-The Pop method removes and returns the element 
-with the highest priority by swapping it 
-with the last element in the slice and then calling the down function to fix the heap invariant.
-*/
-func (servers *Servers) Pop() any {
-	old := *servers
-	n := len(old)
-	item := old[n-1]
-	old[n-1] = nil // avoid memory leak
-	// item.Index = -1 // for safety
-	*servers = old[0:n-1]
-	return item
-}
-
-func (servers *Servers) update(item *ServerStatus, traffic uint64){
-	item.Traffic = traffic
-	heap.Fix(servers, item.Index)
-}
-
-func (servers *Servers) Seek() any{
-	if len(*servers) == 0{
-		return nil
-	}
-	return (*servers)[0]
-}
-
-
-func CreateNewServer(host string) *ServerStatus{
+func createNewServer(host string)*ServerStatus{
 	return &ServerStatus{
-			Traffic: 0,
-			Proxy: httputil.NewSingleHostReverseProxy(&url.URL{
-				Scheme: "http",                            
-				Host: host,         
-			}),                                         
-			Index: 0, // will be updated while pushing
-			Mutex: sync.Mutex{},
+		Traffic: 0,
+		Proxy: httputil.NewSingleHostReverseProxy(&url.URL{
+			Scheme: "http",
 			Host: host,
-		}
+		}),
+		Index: -1, // will be handled by the heap
+		Host: host,
+	}
 }
 
-// pushing new server to the server
-func (servers *Servers)PushNewServer(host string){
-	serverMutex.Lock()
-	defer serverMutex.Unlock()
-
-	heap.Push(servers, CreateNewServer(host))
-}
-
-// poping the server out of the server
-// server with least traffic
-func (servers *Servers)PopServer() *ServerStatus{
-	serverMutex.Lock()
-	defer serverMutex.Unlock()
-
-	return heap.Pop(servers).(*ServerStatus)
-}
-
-// find server in the heap
-func (servers *Servers) FindServer(host string) *ServerStatus{
-	for _, s := range *servers{
+func (server *Server)findServer(host string) *ServerStatus{
+	for _, s := range *server.Servers{
 		if s.Host == host{
 			return s
 		}
@@ -122,69 +36,91 @@ func (servers *Servers) FindServer(host string) *ServerStatus{
 	return nil
 }
 
-// enqueue request for given server
-func (servers *Servers) EnqueueRequest(server *ServerStatus){
-	server.Mutex.Lock()
-	defer server.Mutex.Unlock()
+func (server *Server) GetLeastTrafficServer() *ServerStatus{
+	serverMutex.RLock()
+	defer serverMutex.RUnlock()
 
-	servers.update(server, server.Traffic+1)
+	return server.Servers.Seek().(*ServerStatus)
 }
 
-// request enqueued to server for given host
-func (servers *Servers) EnqueueRequestForHost(host string){
+func (server *Server) AddServer(host string){
+	serverMutex.Lock()
+	defer serverMutex.Unlock()
 
-	server := servers.FindServer(host)
-	if server == nil{
-		fmt.Println("Unable to find server with hostname ", host)
+	fmt.Println("Requested: Add server: ", host)
+
+	newServer := createNewServer(host)
+	heap.Push(server.Servers, newServer)
+	fmt.Println("Added server: ", host)
+}
+
+func (server *Server) RemoveServer(host string){
+	serverMutex.Lock()
+	defer serverMutex.Unlock()
+
+	fmt.Println("Requested: Remove server: ", host)
+
+	s := server.findServer(host)
+	if s==nil{return}
+
+	heap.Remove(server.Servers, s.Index)	
+	fmt.Println("Removed server: ", host)
+}
+
+// Used when server status is retrieved with least traffiic
+// So that the pointer can be passed directly for updating the traffic
+func (server *Server) EnqueueRequest(s *ServerStatus){
+	serverMutex.Lock()
+	defer serverMutex.Unlock()
+
+	server.Servers.Update(s, s.Traffic+1)
+	
+	fmt.Println("Enqueued request")
+	fmt.Println("Current Servers Status: ")
+	server.Servers.printStatuses()
+}
+
+func (server *Server) EnqueueRequestToHost(host string){
+	serverMutex.Lock()
+	defer serverMutex.Unlock()
+
+	s := server.findServer(host)
+	if s == nil{
 		return
 	}
 
-	server.Mutex.Lock()
-	defer server.Mutex.Unlock()
-
-	servers.update(server, server.Traffic+1)
+	server.Servers.Update(s, s.Traffic+1)
+	fmt.Println("Enqueued request")
+	fmt.Println("Current Servers Status: ")
+	server.Servers.printStatuses()
 }
 
+func (server *Server) DequeueRequestFromHost(host string){
+	serverMutex.Lock()
+	defer serverMutex.Unlock()
 
-// request dequeued from the server for given host
-func (servers *Servers) DequeueRequestForHost(host string){
-
-	server := servers.FindServer(host)
-	if server == nil{
-		fmt.Println("Unable to find server with hostname ", host)
+	s := server.findServer(host)
+	if s == nil{
 		return
 	}
-	server.Mutex.Lock()
-	defer server.Mutex.Unlock()
 
-	servers.update(server, server.Traffic-1)
+	server.Servers.Update(s, s.Traffic-1)
+	fmt.Println("Dequeued request")
+	fmt.Println("Current Servers Status: ")
+	server.Servers.printStatuses()
 }
 
-
-func SetupServers() *Servers{
-	serverHeap := Servers{
-		&ServerStatus{
-			Traffic : 10,
-			Proxy : httputil.NewSingleHostReverseProxy(&url.URL{
-					Scheme: "http",
-					Host: "localhost:5000",                    
-				}),
-			Index: 0, 
-			Mutex: sync.Mutex{},
-			Host: "localhost:5000",
-		},
-		&ServerStatus{
-			Traffic: 0,
-			Proxy: httputil.NewSingleHostReverseProxy(&url.URL{
-				Scheme: "http",                            
-				Host: "localhost:4000",         
-			}),                                         
-			Index: 1,
-			Mutex: sync.Mutex{},
-			Host: "localhost:4000",
-		},
+func (servers *ServerStatuses)printStatuses(){
+	for _, s:= range *servers{
+		fmt.Println(s.Host, " has traffic = ", s.Traffic)
 	}
-	heap.Init(&serverHeap)
+}
 
-	return &serverHeap
+func SetupServers() *Server{
+	serverHeap := &ServerStatuses{}
+
+	// Initializing the heap
+	heap.Init(serverHeap)
+
+	return &Server{Servers: serverHeap}
 }
