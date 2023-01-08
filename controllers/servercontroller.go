@@ -7,6 +7,10 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+type HostRequestBody struct{
+	Host string `json:"host"`
+}
+
 // Route the request to minimum traffic server
 func EnqueueRequest(server *servers.Server) gin.HandlerFunc{
 	return func(c *gin.Context) {
@@ -38,28 +42,39 @@ func EnqueueRequest(server *servers.Server) gin.HandlerFunc{
 // request from server that a request has been completed
 func DequeueRequest(server *servers.Server) gin.HandlerFunc{
 	return func (c *gin.Context)  {
-		host := c.Request.RemoteAddr
-		fmt.Println(host, " => Completed a request")
-		go server.DequeueRequestFromHost(host)
+		var reqBody HostRequestBody
+
+		if err := c.BindJSON(&reqBody); err != nil{
+			c.JSON(404, gin.H{"message":err.Error()})
+			return 
+		}
+
+		go server.DequeueRequestFromHost(reqBody.Host)
 	}
 }
 
 // TODO Authenticate whether request coming from valid server
 func AddNewServerController(server *servers.Server) gin.HandlerFunc{
 	return func(c *gin.Context){
-		host := c.Request.RemoteAddr
+		var reqBody HostRequestBody
 
-		fmt.Println("RemoteAddr => ", host)
-		fmt.Println("RequestURI => ", c.Request.RequestURI)
-		fmt.Println("RemoteIP   => ", c.RemoteIP())
-		go server.AddServer(host)
+		if err := c.BindJSON(&reqBody); err != nil{
+			c.JSON(404, gin.H{"message":err.Error()})
+			return 
+		}
+		go server.AddServer(reqBody.Host)
 	}
 }
 
 // TODO Authenticate whether request coming from valid server
 func RemoveServerController(server *servers.Server) gin.HandlerFunc{
 	return func(c *gin.Context){
-		host := c.Request.RemoteAddr
-		go server.RemoveServer(host)
+		var reqBody HostRequestBody
+
+		if err := c.BindJSON(&reqBody); err != nil{
+			c.JSON(404, gin.H{"message":err.Error()})
+			return 
+		}
+		go server.RemoveServer(reqBody.Host)
 	}
 }

@@ -1,11 +1,12 @@
 package servers
 
-import(
+import (
 	"fmt"
 	"sync"
 	"net/url"
-	"net/http/httputil"
+	"net/http"
 	"container/heap"
+	"net/http/httputil"
 )
 
 // For creating locks for the heap
@@ -16,12 +17,21 @@ type Server struct{
 }
 
 func createNewServer(host string)*ServerStatus{
+	target, err := url.Parse(host)
+	if err != nil{
+		fmt.Println(err.Error())
+		return nil
+	}
 	return &ServerStatus{
 		Traffic: 0,
-		Proxy: httputil.NewSingleHostReverseProxy(&url.URL{
-			Scheme: "http",
-			Host: host,
-		}),
+		Proxy: &httputil.ReverseProxy{
+			Director: func (req *http.Request)  {
+				req.URL.Path = "/"	
+				req.URL.Host = target.Host
+				req.Host = target.Host
+				req.URL.Scheme = target.Scheme
+			},
+		},
 		Index: -1, // will be handled by the heap
 		Host: host,
 	}
@@ -43,6 +53,7 @@ func (server *Server) GetLeastTrafficServer() *ServerStatus{
 	return server.Servers.Seek().(*ServerStatus)
 }
 
+// host format => http://something.com | https://something.com
 func (server *Server) AddServer(host string){
 	serverMutex.Lock()
 	defer serverMutex.Unlock()
